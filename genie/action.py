@@ -14,17 +14,21 @@ from genie.utils import Blueprint
 
 REPR_ACT_ENC = (
     ('space-time_attn', {
-        'n_repr' : 8,
-        'n_heads': 8,
+        'n_rep' : 8,
+        'n_head': 8,
         'd_head': 64,
+        'd_inp': 128,  # Should match n_embd from LatentAction
+        'transpose': True,
     }),
 )
 
 REPR_ACT_DEC = (
     ('space-time_attn', {
-        'n_repr' : 8,
-        'n_heads': 8,
+        'n_rep' : 8,
+        'n_head': 8,
         'd_head': 64,
+        'd_inp': 128,  # Should match n_embd from LatentAction
+        'transpose': True,
     }),
 )
 
@@ -113,7 +117,7 @@ class LatentAction(nn.Module):
         video: Tensor,
         mask : Tensor | None = None,
         transpose : bool = False,
-    ) -> Tuple[Tuple[Tensor, Tensor], Tensor]:
+    ) -> Tuple[Tuple[Tensor, Tensor | None, Tensor], Tensor]:
         video = self.proj_in(video)
         
         # Encode the video frames into latent actions
@@ -123,8 +127,9 @@ class LatentAction(nn.Module):
         # Project to latent action space
         act : Tensor = self.to_act(video)
 
-        # Quantize the latent actions
-        (act, idxs), q_loss = self.quant(act, transpose=transpose)
+        # Skip discrete quantization, return continuous action embedding directly
+        q_loss = torch.tensor(0.0, device=video.device)
+        idxs = None
         
         return (act, idxs, video), q_loss
     
@@ -152,10 +157,13 @@ class LatentAction(nn.Module):
         self,
         video: Tensor,
         mask : Tensor | None = None,
-    ) -> Tuple[Tensor, Tensor]:
+    ) -> Tuple[Tensor, Tensor, Tuple[Tensor, Tensor]]:
         
         # Encode the video frames into latent actions
-        (act, idxs, enc_video), q_loss = self.encode(video, mask=mask)
+        # NOTE: Do NOT pass the temporal padding mask to the attention layers
+        # because SpaceTimeAttention incorrectly broadcasts it to spatial attention
+        # and causal attention inherently ignores future padding anyway.
+        (act, idxs, enc_video), q_loss = self.encode(video, mask=None)
         
         # Decode the last video frame based on all the previous
         # frames and the quantized latent actions
@@ -163,14 +171,19 @@ class LatentAction(nn.Module):
         
         # Compute the reconstruction loss
         # Reconstruction loss
-        rec_loss = mse_loss(recon, video)
+        if mask is not None:
+            # mask is (batch, time), we need to expand it to match video shape
+            m = mask.unsqueeze(1).unsqueeze(3).unsqueeze(4).expand_as(video)
+            rec_loss = ((recon - video) ** 2)[m].mean()
+        else:
+            rec_loss = mse_loss(recon, video)
         
         # Compute the total loss by combining the individual
         # losses, weighted by the corresponding loss weights
         loss = rec_loss\
             + q_loss * self.quant_loss_weight
         
-        return idxs, loss, (
+        return act, loss, (
             rec_loss,
             q_loss,
         )
