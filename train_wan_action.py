@@ -12,10 +12,33 @@ from genie.action import LatentAction, REPR_ACT_ENC, REPR_ACT_DEC
 
 class SafetensorsDataset(Dataset):
     def __init__(self, data_dir):
-        # Find all .safetensors files that contain 'wan' but aren't text embeddings
+        # Find all .safetensors files that are video VAE embeddings (NOT text embeddings)
+        # Only keep files with shape [16, T, 60, 104]
         pattern = os.path.join(data_dir, "**/*_wan.safetensors")
-        self.files = [f for f in glob.glob(pattern, recursive=True) if "_wan_te" not in f]
-        print(f"Found {len(self.files)} safetensors files")
+        all_files = glob.glob(pattern, recursive=True)
+        
+        # Strict filtering: exclude text embeddings and validate shape
+        self.files = []
+        for f in all_files:
+            # Skip text embedding files explicitly
+            if "_wan_te" in f or "_text" in f.lower():
+                continue
+            
+            # Load and validate shape: must be (16, T, 60, 104) for VAE embeddings
+            try:
+                data = load_file(f)
+                key = list(data.keys())[0]
+                tensor = data[key]
+                # VAE embedding should have 16 channels and spatial shape 60x104
+                if tensor.ndim == 4 and tensor.shape[0] == 16 and tensor.shape[2] == 60 and tensor.shape[3] == 104:
+                    self.files.append(f)
+            except Exception:
+                # Skip files that fail to load or have unexpected format
+                continue
+        
+        print(f"Found {len(self.files)} valid VAE embedding files (from {len(all_files)} total)")
+        if len(self.files) == 0:
+            print("WARNING: No valid VAE embedding files found!")
 
     def __len__(self):
         return len(self.files)
@@ -24,12 +47,15 @@ class SafetensorsDataset(Dataset):
         file_path = self.files[idx]
         data = load_file(file_path)
         
-        # Typically saved as 'latents_20x60x104_bfloat16' or similar. 
-        # We take the first available tensor.
+        # Get the VAE embedding tensor
         key = list(data.keys())[0]
-        latent_tensor = data[key] # Shape: [16, 20, 60, 104] (C, T, H, W)
+        latent_tensor = data[key] # Shape: [16, T, 60, 104] (C, T, H, W)
         
-        # Original Action Model expects float32
+        # Validate shape
+        assert latent_tensor.shape[0] == 16
+        assert latent_tensor.shape[2] == 60 and latent_tensor.shape[3] == 104
+        
+        # Convert to float32 for training
         return latent_tensor.float()
 
 def collate_fn(batch):

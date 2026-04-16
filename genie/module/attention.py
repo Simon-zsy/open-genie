@@ -398,11 +398,15 @@ class SpaceTimeAttention(nn.Module):
         if isinstance(embed, bool):
             embed = (embed, embed)
         
+        space_out_dim = n_head[0] * d_head[0]
+        time_out_dim = n_head[1] * d_head[1]
+        final_out_dim = default(d_out, d_inp)
+        
         self.space_attn = SpatialAttention(
             n_head=n_head[0],
             d_head=d_head[0],
             d_inp=d_inp,
-            d_out=n_head[0] * d_head[0],  # Space skip output matches this -> 512
+            d_out=space_out_dim,
             bias=bias,
             scale=scale,
             embed=embed[0],
@@ -415,12 +419,11 @@ class SpaceTimeAttention(nn.Module):
         self.temp_attn = TemporalAttention(
             n_head=n_head[1],
             d_head=d_head[1],
-            d_inp=n_head[0] * d_head[0],  # Recieves space_attn output -> 512
-            d_out=d_out,
+            d_inp=space_out_dim,
+            d_out=time_out_dim,
             bias=bias,
             scale=scale,
             embed=embed[1],
-            # * Causal attention for temporal attention
             causal=True, 
             dropout=dropout,
             transpose=transpose,
@@ -428,8 +431,8 @@ class SpaceTimeAttention(nn.Module):
         )
         
         self.ffn = ForwardBlock(
-            n_head[1] * d_head[1],
-            out_dim=default(d_out, d_inp),  # Output should match input dim for stacking
+            time_out_dim,
+            out_dim=final_out_dim,
             hid_dim=hid_dim,
             num_groups=n_head[1],
             bias=bias,
@@ -448,32 +451,19 @@ class SpaceTimeAttention(nn.Module):
         self.in_channels  = default(d_inp, n_head[0] * d_head[0])
         self.out_channels = default(d_out, d_inp)  # Match input for stacking
         
-        space_hid = d_head[0] * n_head[0]
-        time_hid  = d_head[1] * n_head[1]
-        self.time_skip  = nn.Identity() # Don't need this at the moment
+        self.time_skip  = nn.Identity()
         
-        # FIX: The input video is channels last ('b ... c') or channels first ('b c ...') depending on transpose
-        # and nn.Conv3d only works on channels first. But skip connections are added to attention outputs
-        # which retain the original format. 
-        # A simpler Linear or correctly routed Conv is needed. BUT notice above and below, attention uses
-        # Rearrange. The output of Attention is (b t h w space_hid) or (b c t h w).
-        # We need a proper channel projection.
-        if exists(d_inp) and d_inp != space_hid:
-            if transpose: # pattern = 'b c t h w'
-                self.space_skip = nn.Conv3d(d_inp, space_hid, 1)
-            else:         # pattern = 'b t h w c'
-                self.space_skip = nn.Linear(d_inp, space_hid)
+        # Skip connections: project from input -> space_out_dim
+        if exists(d_inp) and d_inp != space_out_dim:
+            self.space_skip = nn.Conv3d(d_inp, space_out_dim, 1)
         else:
             self.space_skip = nn.Identity()
             
-        # Project from time_hid (intermediate) to out_channels (final output)
-        if time_hid != self.out_channels:
-            if transpose:
-                self.ffn_skip   = nn.Conv3d(time_hid, self.out_channels, 1) 
-            else:
-                self.ffn_skip   = nn.Linear(time_hid, self.out_channels)
+        # Skip connections: project from time_out_dim -> final_out_dim
+        if time_out_dim != final_out_dim:
+            self.ffn_skip = nn.Conv3d(time_out_dim, final_out_dim, 1) 
         else:
-            self.ffn_skip   = nn.Identity()
+            self.ffn_skip = nn.Identity()
         
     def forward(
         self,
