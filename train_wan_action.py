@@ -2,6 +2,7 @@ import os
 import glob
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.distributed as dist
 from torch.utils.data import Dataset, DataLoader, DistributedSampler
 from safetensors.torch import load_file
@@ -74,8 +75,8 @@ def main():
     
     # 2. Setup config
     data_dir = "/localdata/szhoubx/med_video/dataset/cholec80_action/cache_dir"
-    batch_size = 1
-    epochs = 100
+    batch_size = 8
+    epochs = 20
     learning_rate = 1e-4
     
     if is_main_process:
@@ -106,7 +107,7 @@ def main():
     
     # Note: Wan Latent Shape is [C=16, T=20, H=60, W=104]
     inp_channels = 16
-    inp_shape = (60, 104)
+    inp_shape = (30, 52)  # Downsampled for memory savings
     # The continuous action dimensions to extract per frame (Information Bottleneck)
     d_codebook = 8 
 
@@ -148,6 +149,11 @@ def main():
         for batch_videos, batch_masks in pbar:
             batch_videos = batch_videos.to(device)
             batch_masks = batch_masks.to(device)
+            
+            # Downsample video latents spatially by 2x to reduce memory usage completely
+            # shape is (B, C, T, H, W)
+            orig_shape = batch_videos.shape
+            batch_videos = F.interpolate(batch_videos, size=(orig_shape[2], 30, 52), mode='trilinear', align_corners=False)
             
             optimizer.zero_grad()
             

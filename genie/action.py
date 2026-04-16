@@ -1,6 +1,8 @@
 from typing import Tuple
 from torch import Tensor
+import torch
 import torch.nn as nn
+from torch.utils.checkpoint import checkpoint
 
 from math import prod
 from torch.nn.functional import mse_loss
@@ -122,8 +124,16 @@ class LatentAction(nn.Module):
         
         # Encode the video frames into latent actions
         for enc in self.enc_layers:
-            video = enc(video, mask=mask)
-        
+            if video.requires_grad and self.training:
+                # Use gradient checkpointing to save memory
+                def make_custom_forward(enc_module):
+                    def custom_forward(x):
+                        return enc_module(x, mask=mask)
+                    return custom_forward
+                video = checkpoint(make_custom_forward(enc), video, use_reentrant=False)
+            else:
+                video = enc(video, mask=mask)
+                
         # Project to latent action space
         act : Tensor = self.to_act(video)
 
@@ -141,13 +151,16 @@ class LatentAction(nn.Module):
         # Decode the video frames based on past history and
         # the quantized latent actions
         for dec, has_ext in zip(self.dec_layers, self.dec_ext):
-            video = dec(
-                video,
-                cond=(
-                    None, # No space condition
-                    q_act if has_ext else None,
-                )
-            )
+            cond = (None, q_act if has_ext else None)
+            if video.requires_grad and self.training:
+                # Gradient Checkpointing for decoder
+                def make_custom_dec(dec_module, cond_val):
+                    def dec_forward(x):
+                        return dec_module(x, cond=cond_val)
+                    return dec_forward
+                video = checkpoint(make_custom_dec(dec, cond), video, use_reentrant=False)
+            else:
+                video = dec(video, cond=cond)
             
         recon = self.proj_out(video)
         
