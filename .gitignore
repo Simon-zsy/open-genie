@@ -9,3 +9,7 @@
 *log*
 *.local*
 test/.*
+*.pt
+*.safetensors
+*.mp4
+events*

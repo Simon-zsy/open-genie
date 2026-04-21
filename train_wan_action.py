@@ -133,7 +133,7 @@ def main():
     
     # Note: Wan Latent Shape is [C=16, T=20, H=60, W=104]
     inp_channels = 16
-    inp_shape = (30, 52)  # Downsampled for memory savings
+    inp_shape = (60, 104)  # Use native resolution directly
     # The continuous action dimensions to extract per frame (Information Bottleneck)
     d_codebook = 8 
 
@@ -176,10 +176,8 @@ def main():
             batch_videos = batch_videos.to(device)
             batch_masks = batch_masks.to(device)
             
-            # Downsample video latents spatially by 2x to reduce memory usage completely
+            # Keep video latents at native resolution [16, 60, 104]
             # shape is (B, C, T, H, W)
-            orig_shape = batch_videos.shape
-            batch_videos = F.interpolate(batch_videos, size=(orig_shape[2], 30, 52), mode='trilinear', align_corners=False)
             
             optimizer.zero_grad()
             
