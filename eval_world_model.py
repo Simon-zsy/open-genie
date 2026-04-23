@@ -131,7 +131,7 @@ def main():
             step_mse = step_mse.mean(dim=(0, 2, 3, 4)).tolist()
             
             print(f"Sample {i+1} [{os.path.basename(f)}]:")
-            print(f"  [>] 时长 (T): {T} 帧 (推演长度: {T-1} 步)")
+            print(f"  [>] 时长 (T): {obs_seq.shape[1]} 帧 (推演长度: {obs_seq.shape[1]-1} 步)")
             print(f"  [>] Imagination MSE: {mse.item():.5f}")
             print(f"  [>] 误差累积 (T=1, T=N//2, T=N): {step_mse[0]:.4f} -> {step_mse[len(step_mse)//2]:.4f} -> {step_mse[-1]:.4f}")
             print("-" * 50)

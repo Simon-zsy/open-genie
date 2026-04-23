@@ -6,6 +6,7 @@ import torch.nn.functional as F
 import torch.distributed as dist
 from torch.utils.data import Dataset, DataLoader, DistributedSampler
 from safetensors.torch import load_file
+from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
 from genie.action import LatentAction, REPR_ACT_ENC, REPR_ACT_DEC
@@ -102,7 +103,7 @@ def main():
     # 2. Setup config
     data_dir = "/localdata/szhoubx/med_video/dataset/cholec80_action/cache_dir"
     batch_size = 8
-    epochs = 20
+    epochs = 30
     learning_rate = 1e-4
     
     if is_main_process:
@@ -133,7 +134,7 @@ def main():
     
     # Note: Wan Latent Shape is [C=16, T=20, H=60, W=104]
     inp_channels = 16
-    inp_shape = (60, 104)  # Use native resolution directly
+    inp_shape = (30, 52)  
     # The continuous action dimensions to extract per frame (Information Bottleneck)
     d_codebook = 8 
 
@@ -154,16 +155,22 @@ def main():
         model = nn.parallel.DistributedDataParallel(
             model,
             device_ids=[rank],
-            output_device=rank
+            output_device=rank,
+            find_unused_parameters=True  # 允许某些参数在 forward 中未被使用
         )
 
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
 
     if is_main_process:
         print(f"Starting training on {device}...")
+        os.makedirs("runs", exist_ok=True)
+        writer = SummaryWriter(log_dir="runs/lam_training")
+    else:
+        writer = None
     
     # 5. Training Loop
     model.train()
+    global_step = 0
     for epoch in range(epochs):
         total_loss = 0
         num_batches = 0
@@ -176,8 +183,10 @@ def main():
             batch_videos = batch_videos.to(device)
             batch_masks = batch_masks.to(device)
             
-            # Keep video latents at native resolution [16, 60, 104]
+            # Downsample video latents spatially by 2x to reduce memory usage completely
             # shape is (B, C, T, H, W)
+            orig_shape = batch_videos.shape
+            batch_videos = F.interpolate(batch_videos, size=(orig_shape[2], 30, 52), mode='trilinear', align_corners=False)
             
             optimizer.zero_grad()
             
@@ -189,6 +198,12 @@ def main():
             
             total_loss += loss.item()
             num_batches += 1
+            global_step += 1
+            
+            if is_main_process:
+                writer.add_scalar('Train_Step/Total_Loss', loss.item(), global_step)
+                writer.add_scalar('Train_Step/Recon_Loss', rec_loss.item(), global_step)
+                writer.add_scalar('Train_Step/Q_Loss', q_loss.item(), global_step)
             
             if is_main_process and isinstance(pbar, tqdm):
                 pbar.set_postfix(loss=loss.item(), rec_loss=rec_loss.item())
@@ -202,16 +217,19 @@ def main():
         
         if is_main_process:
             print(f"Epoch {epoch+1} completed. Avg Loss: {avg_loss:.4f}")
+            writer.add_scalar('Train_Epoch/Avg_Total_Loss', avg_loss, epoch + 1)
+            
+            # 定期保存 checkpoint
+            if (epoch + 1) % 5 == 0 or epoch == epochs - 1:
+                os.makedirs("checkpoints", exist_ok=True)
+                model_state = model.module.state_dict() if isinstance(model, nn.parallel.DistributedDataParallel) else model.state_dict()
+                torch.save(model_state, f"checkpoints/lam_ep{epoch+1}.pt")
+                print(f"Checkpoint saved: checkpoints/lam_ep{epoch+1}.pt")
         
-    # Save the trained Action Extraction Model (only on rank 0)
-    if is_main_process:
-        os.makedirs("checkpoints", exist_ok=True)
-        # Save only the model state (handle both DDP and non-DDP cases)
-        model_state = model.module.state_dict() if isinstance(model, nn.parallel.DistributedDataParallel) else model.state_dict()
-        torch.save(model_state, "checkpoints/action_extractor_continuous.pt")
-        print("Training finished! Model saved to checkpoints/action_extractor_continuous.pt")
-    
     # Cleanup
+    if is_main_process and writer is not None:
+        writer.close()
+    
     if world_size > 1:
         dist.destroy_process_group()
 

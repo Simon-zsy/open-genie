@@ -137,7 +137,7 @@ def main():
     ).to(device)
     
     if world_size > 1:
-        wm = nn.parallel.DistributedDataParallel(wm, device_ids=[rank], output_device=rank)
+        wm = nn.parallel.DistributedDataParallel(wm, device_ids=[rank], output_device=rank, find_unused_parameters=True)
 
     optimizer = torch.optim.AdamW(wm.parameters(), lr=learning_rate, weight_decay=1e-5)
 

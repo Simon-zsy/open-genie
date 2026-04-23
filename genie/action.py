@@ -171,31 +171,32 @@ class LatentAction(nn.Module):
         video: Tensor,
         mask : Tensor | None = None,
     ) -> Tuple[Tensor, Tensor, Tuple[Tensor, Tensor]]:
-        
-        # Encode the video frames into latent actions
+
+        # Encode the video frames into latent actions.
         # NOTE: Do NOT pass the temporal padding mask to the attention layers
         # because SpaceTimeAttention incorrectly broadcasts it to spatial attention
         # and causal attention inherently ignores future padding anyway.
         (act, idxs, enc_video), q_loss = self.encode(video, mask=None)
-        
-        # Decode the last video frame based on all the previous
-        # frames and the quantized latent actions
-        recon = self.decode(enc_video, act)
-        
-        # Compute the reconstruction loss
-        # Reconstruction loss
+
+        # Next-frame prediction: at position t, enc_video[t] (derived from
+        # video[0..t]) and act[t] must predict video[t+1]. This forces the
+        # action to carry the inter-frame transition information rather than
+        # allowing the decoder to shortcut through enc_video[t] directly.
+        past_enc  = enc_video[:, :, :-1]  # [B, C, T-1, H, W]
+        future_gt = video[:, :, 1:]       # [B, C, T-1, H, W]
+        act_for_decode = act[:, :-1]      # [B, T-1, d_codebook]
+
+        recon = self.decode(past_enc, act_for_decode)
+
         if mask is not None:
-            # mask is (batch, time), we need to expand it to match video shape
-            m = mask.unsqueeze(1).unsqueeze(3).unsqueeze(4).expand_as(video)
-            rec_loss = ((recon - video) ** 2)[m].mean()
+            # Shift mask by 1 to align with future_gt (targets are frames 1..T)
+            m = mask[:, 1:].unsqueeze(1).unsqueeze(3).unsqueeze(4).expand_as(future_gt)
+            rec_loss = ((recon - future_gt) ** 2)[m].mean()
         else:
-            rec_loss = mse_loss(recon, video)
-        
-        # Compute the total loss by combining the individual
-        # losses, weighted by the corresponding loss weights
-        loss = rec_loss\
-            + q_loss * self.quant_loss_weight
-        
+            rec_loss = mse_loss(recon, future_gt)
+
+        loss = rec_loss + q_loss * self.quant_loss_weight
+
         return act, loss, (
             rec_loss,
             q_loss,
